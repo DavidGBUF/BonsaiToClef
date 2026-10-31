@@ -1,0 +1,23 @@
+diff --git a/src/models/lfm3.cpp b/src/models/lfm3.cpp
+index 174ce9c..d13a323 100644
+--- a/src/models/lfm3.cpp
++++ b/src/models/lfm3.cpp
+@@ -207,10 +207,12 @@ llama_model_lfm3::graph<decision>::graph(const llama_model & model, const llm_gr
+     cb(cur, "result_norm", -1);
+     res->t_embd = cur;
+-
++
+-    cur = build_lora_mm(model.output, cur, model.output_s);
+-    cb(cur, "result_output", -1);
+-
+-    res->t_logits = cur;
++    // DecisionLFM consumes hidden states; omit the unused generative vocabulary projection.
++    if (!cparams.embeddings) {
++        cur = build_lora_mm(model.output, cur, model.output_s);
++        cb(cur, "result_output", -1);
++        res->t_logits = cur;
++    }
+ }
+-
++
+ template struct llama_model_lfm3::graph<false>;
