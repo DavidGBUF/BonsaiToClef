@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from esquema import prepare_record, format_answer
 from modelo import encode
+from calibracao import load_calibration
 
 LLAMA_COMMIT = "0ec4027a2a0183de87c007069adddc06e665f7de"
 CLEF_MODEL = "Cloudflare/clef-flash"
@@ -47,9 +48,15 @@ class Runtime:
         capacity=2048,
         library=None,
         clef_dir=None,
+        calibrated=True,
     ):
         self.family = family
         self.capacity = capacity
+        self.temperatures = (
+            load_calibration(Path(head).parent)
+            if family == "decision" and head and calibrated
+            else {}
+        )
         if family not in {"decision", "clef"} or capacity < 1:
             raise ValueError("Use family decision/clef e capacity > 0")
         if family == "decision" and (head is None or tokenizer is None):
@@ -184,7 +191,9 @@ class Runtime:
                 raise RuntimeError(self.lib.df_error().decode())
             if not np.all(np.isfinite(values)):
                 raise ValueError("Non-finite decision scores")
-            ps = np.exp(values.astype(np.float64) - values.max())
+            temperature = self.temperatures.get(q["type"], 1.0)
+            scaled = values.astype(np.float64) / temperature
+            ps = np.exp(scaled - scaled.max())
             ps /= ps.sum()
             answers[key] = format_answer(q, dict(zip(option_ids, ps.tolist())))
             tokens += len(ids)

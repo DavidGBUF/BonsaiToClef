@@ -31,6 +31,7 @@ def main():
     p.add_argument("--library", type=Path)
     p.add_argument("--clef-dir", type=Path)
     p.add_argument("--capacity", type=int, default=2048)
+    p.add_argument("--uncalibrated", action="store_true")
     a = p.parse_args()
     if a.output.exists() or a.capacity < 1:
         p.error("Use diretório novo e capacity > 0")
@@ -98,8 +99,16 @@ def main():
     rows = []
     try:
         runtime = Runtime(
-            a.family, a.backbone, a.head, a.tokenizer, a.capacity, a.library, a.clef_dir
+            a.family,
+            a.backbone,
+            a.head,
+            a.tokenizer,
+            a.capacity,
+            a.library,
+            a.clef_dir,
+            calibrated=not a.uncalibrated,
         )
+        run["temperatures"] = runtime.temperatures
         for kind in ["choice", "noul", "score"]:
             first = next((s for s in samples if s["type"] == kind), None)
             if first is None:

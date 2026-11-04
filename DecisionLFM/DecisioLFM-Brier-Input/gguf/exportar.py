@@ -12,6 +12,7 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from dados_tipos import digest
+from calibracao import load_calibration
 
 LLAMA_COMMIT = "0ec4027a2a0183de87c007069adddc06e665f7de"
 
@@ -26,6 +27,11 @@ def export_decision(checkpoint, destination, quants, gguf):
     if training["status"] != "completed":
         raise ValueError("Use um checkpoint com treinamento concluído")
     config = json.loads((checkpoint / "decision_config.json").read_text())
+    temperatures = load_calibration(checkpoint, verify_weights=True)
+    if temperatures:
+        shutil.copyfile(
+            checkpoint / "calibration.json", destination / "calibration.json"
+        )
     torch.set_num_threads(8)
     model = AutoModel.from_pretrained(
         config["base_model"],
@@ -80,6 +86,7 @@ def export_decision(checkpoint, destination, quants, gguf):
         "head_sha256": digest(checkpoint / "head.safetensors"),
         "lora_merge_dtype": "FP32",
         "training": training,
+        "temperatures": temperatures,
     }
 
 

@@ -92,6 +92,16 @@ def digest(path):
     return value.hexdigest()
 
 
+def code_hashes(directory):
+    """Registra nosso código, sem percorrer ambientes, pesos ou backends externos."""
+    root = Path(directory)
+    return {
+        str(path.relative_to(root)): digest(path)
+        for folder in (root, root / "gguf", root / "tests")
+        for path in sorted(folder.glob("*.py"))
+    }
+
+
 def group_key(task, row):
     if task == "boolq":
         text = row["passage"]
@@ -172,6 +182,7 @@ def encoded_record(tokenizer, sample, max_length=8192, rng=None):
         raise ValueError("Alvo ausente das alternativas")
     record = encode(tokenizer, state, question["instructions"], options, max_length)
     record.update(target=keys.index(target), type=sample["type"], task=sample["task"])
+    record["id"] = sample.get("id")
     return record
 
 

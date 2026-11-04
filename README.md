@@ -128,6 +128,13 @@ baseado no LFM3-VL-2B, com treino de cabeça + LoRA, salvamento e inferência.
 Seu README explica a execução e a comparação usando este mesmo avaliador.
 O código e o ambiente do baseline CLEF permanecem independentes.
 
+A abordagem [DecisionLFM CE+Brier com entrada JSON](DecisionLFM/DecisioLFM-Brier-Input/README.md)
+inclui `choice`, `noul` e `score`, treino de até três épocas com LoRA rank 8,
+seleção por validação e calibração por tipo com proteção do MAE de `score`.
+O README contém o fluxo completo para preparar dados, treinar, conferir os pesos,
+calibrar, responder a um JSON e avaliar. Várias perguntas são respondidas
+sequencialmente, com uma passagem pelo backbone por pergunta.
+
 ## Referências
 
 - [CLEF-Flash e implementação oficial](https://huggingface.co/Cloudflare/clef-flash)

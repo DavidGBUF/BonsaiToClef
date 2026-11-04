@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from safetensors.torch import load_file, save_file
 
 from esquema import format_answer, prepare_record
+from calibracao import load_calibration, probabilities
 
 MODEL = "LiquidAI/LFM3-VL-2B"
 REVISION = "f83d2b0a2296aaa277f394990a9b8b949ddf9691"
@@ -133,6 +134,7 @@ class DecisionLFM(nn.Module):
             next(backbone.parameters()).device
         )
         self.has_lora = False
+        self.temperatures = {}
         self.backbone.requires_grad_(False)
         self.backbone.eval()
 
@@ -173,17 +175,17 @@ class DecisionLFM(nn.Module):
         return self.head(query, options, batch["option_mask"])
 
     @torch.inference_mode()
-    def decidir(self, state, question, options):
+    def decidir(self, state, question, options, temperature=1.0):
         if self.training:
             raise ValueError("Use model.eval() antes de decidir")
         record = encode(self.tokenizer, state, question, options, self.max_length)
         batch = collate(
             [record], self.tokenizer.pad_token_id, next(self.parameters()).device
         )
-        probabilities = self(batch)[0].softmax(-1)
-        if not torch.isfinite(probabilities).all():
+        ps = probabilities(self(batch)[0], temperature)
+        if not torch.isfinite(ps).all():
             raise ValueError("Probabilidades não finitas")
-        values = dict(zip(record["option_ids"], probabilities.tolist()))
+        values = dict(zip(record["option_ids"], ps.tolist()))
         prediction = max(values, key=values.get)
         return {
             "prediction": prediction,
@@ -197,7 +199,13 @@ class DecisionLFM(nn.Module):
         state, questions = prepare_record(record)
         answers, input_tokens = {}, 0
         for key, question in questions.items():
-            result = self.decidir(state, question["instructions"], question["options"])
+            temperature = getattr(self, "temperatures", {}).get(question["type"], 1.0)
+            result = self.decidir(
+                state,
+                question["instructions"],
+                question["options"],
+                temperature=temperature,
+            )
             answers[key] = format_answer(question, result["probabilities"])
             input_tokens += result["input_tokens"]
         return {
@@ -235,7 +243,7 @@ class DecisionLFM(nn.Module):
         )
 
     @classmethod
-    def load(cls, directory):
+    def load(cls, directory, calibrated=True):
         from peft import PeftModel
         from transformers import AutoTokenizer
 
@@ -259,6 +267,9 @@ class DecisionLFM(nn.Module):
             model.has_lora = True
         model.head.load_state_dict(
             load_file(directory / "head.safetensors", device="cpu")
+        )
+        model.temperatures = (
+            load_calibration(directory, verify_weights=True) if calibrated else {}
         )
         return model.eval()
 

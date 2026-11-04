@@ -78,6 +78,9 @@ def main():
     parser.add_argument("--clef-dir", type=Path, help="Snapshot local completo do CLEF")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--warmup", type=int, default=3)
+    parser.add_argument(
+        "--uncalibrated", action="store_true", help="Controle com T=1, mesmos pesos"
+    )
     args = parser.parse_args()
     if args.output_dir.exists() or args.warmup < 0:
         parser.error("Use diretório novo e warmup >= 0")
@@ -113,7 +116,7 @@ def main():
             training["data_manifest_sha256"] != digest(args.data_dir / "manifest.json")
         ):
             raise ValueError("Manifesto de dados diferente do treino")
-        model = DecisionLFM.load(args.checkpoint)
+        model = DecisionLFM.load(args.checkpoint, calibrated=not args.uncalibrated)
         responder = model.responder
         model_info = {
             "model": "DecisionLFM",
@@ -121,6 +124,8 @@ def main():
             "checkpoint_hash": checkpoint_hash(args.checkpoint),
             "training_regime": training.get("training_regime", "supervised_banking77"),
             "dtype": "backbone BF16; head FP32",
+            "temperatures": model.temperatures,
+            "selected_epoch": training.get("selected_epoch"),
         }
     device = next(model.parameters()).device
     backend = torch.cuda if device.type == "cuda" else torch.mps

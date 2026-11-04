@@ -90,7 +90,7 @@ class JsonModelTests(unittest.TestCase):
         nn.Module.__init__(model)
         state = {"message": "My card was declined.", "attempts": 3}
 
-        def decide(text, instructions, options):
+        def decide(text, instructions, options, temperature=1.0):
             self.assertEqual(json.loads(text), state)
             total = sum(range(1, len(options) + 1))
             probabilities = {key: i / total for i, key in enumerate(options, 1)}

@@ -4,6 +4,44 @@ Esta pasta contém a abordagem `DecisioLFM-Brier-Input`, separada da implementa�
 
 O modelo completo tem aproximadamente 1,92 bilhão de parâmetros; o componente textual tem 1,73 bilhão. Nos experimentos GGUF é usado o componente textual. O modelo-base e o tokenizer estão fixados na revisão `f83d2b0a2296aaa277f394990a9b8b949ddf9691`.
 
+## Executar em PyTorch
+
+O fluxo abaixo parte da raiz do repositório, em uma máquina CUDA/BF16. Prepara os dados, treina cabeça e LoRA rank 8 por até três épocas, confere o checkpoint, calibra e executa a entrada JSON dos três tipos:
+
+```bash
+cd DecisionLFM/DecisioLFM-Brier-Input
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+
+hf download LiquidAI/LFM3-VL-2B \
+  --revision f83d2b0a2296aaa277f394990a9b8b949ddf9691
+
+python dados_tipos.py --output-dir dados/multitarefa \
+  --sources exemplos/fontes_benchmark.json --seed 42
+
+python treinar_tipos.py --data-dir dados/multitarefa --output-dir modelos/r8-novo \
+  --epochs 3 --lora-rank 8 --brier-weight 1 --score-brier-weight 2 \
+  --head-lr 0.0003 --lora-lr 0.00003 --batch-size 4 --gradient-accumulation 4
+
+python verificar_checkpoint.py --checkpoint modelos/r8-novo \
+  --data-dir dados/multitarefa --output resultados/replay-r8-novo.json
+
+python calibrar.py --checkpoint modelos/r8-novo \
+  --data-dir dados/multitarefa --protect-score-mae
+
+python decidir_json.py --checkpoint modelos/r8-novo --input exemplos/entrada.json
+
+python avaliar_tipos.py --checkpoint modelos/r8-novo \
+  --data-dir dados/multitarefa --output-dir resultados/teste-r8-novo
+```
+
+Use nomes novos para dados, modelos e resultados quando já existirem. Pesos e datasets não são distribuídos pelo Git: o checkpoint contém a cabeça, o adaptador LoRA e o tokenizer, e o carregamento também precisa do backbone-base. Quem já tem um checkpoint pode ir direto a `decidir_json.py --checkpoint CAMINHO --input exemplos/entrada.json`; o JSON contém `state` e `questions`.
+
+O comando de treino acima seleciona por Brier e usa redução de LR, que são os padrões. Para priorizar acurácia com taxas constantes, acrescente `--selection-metric accuracy --lr-scheduler constant`. A calibração usa outra metade da validação; o teste deve ser consultado depois de fixar a configuração. Os comandos de busca de hiperparâmetros e GGUF são opcionais e estão nas seções seguintes.
+
+Esta versão mantém a cabeça cosseno: aceita várias perguntas no JSON, mas executa o backbone uma vez por pergunta. O processamento conjunto em uma única passagem ainda não foi integrado a esta pasta.
+
 ## Diferenças em relação ao código commitado
 
 A referência é o commit [`ac1b21a`](https://github.com/VeigarGit/BonsaiToClef/commit/ac1b21a73e86cd734082107acdf505be9f748955), que adicionou o DecisionLFM original ao BonsaiToClef.
@@ -14,8 +52,9 @@ A referência é o commit [`ac1b21a`](https://github.com/VeigarGit/BonsaiToClef/
 | Resposta | Escolha entre alternativas | `choice`, `noul` e `score` |
 | Várias perguntas | Uma por chamada | Várias no JSON; uma passagem pelo backbone por pergunta |
 | Dados de treino | BANKING77 | Várias tarefas dos três tipos, com classes e critérios variáveis |
-| Treinamento padrão | Uma época da cabeça e três de LoRA | Três épocas conjuntas de cabeça + LoRA, rank 8 |
-| Objetivo | Entropia cruzada — CE | CE + 1,0 × Brier multiclasses |
+| Treinamento padrão | Uma época da cabeça e três de LoRA | Até três épocas conjuntas, rank 8; melhor checkpoint por Brier de validação |
+| Objetivo | Entropia cruzada — CE | CE + Brier; peso separado para `score` |
+| Calibração | Sem ajuste posterior | Temperatura por tipo, ajustada em validação reservada |
 | Execução | PyTorch BF16, cabeça FP32 | PyTorch e GGUF F16/Q8_0/Q4_0 |
 | Avaliação | BANKING77 | Coorte pareada, métricas por tarefa/tipo e faixas de tokens |
 
@@ -26,7 +65,7 @@ p = softmax(logits)
 loss = CE(logits, alvo) + peso_brier × soma((p - one_hot(alvo))²)
 ```
 
-O peso padrão é `1.0`; `--brier-weight 0` recupera CE. O Brier usa a escala `[0, 2]`, sem fator `1/2`. Os três tipos são treinados como distribuições sobre alternativas; `score` preserva a ordem dos níveis e retorna a esperança do índice.
+O peso padrão é `1.0` para `choice`/`noul` e `2.0` para `score`. Use `--brier-weight 0 --score-brier-weight 0` para recuperar CE. O Brier usa a escala `[0, 2]`, sem fator `1/2`. Os três tipos são treinados como distribuições sobre alternativas; `score` preserva a ordem dos níveis e retorna a esperança do índice. A calibração posterior aplica `softmax(logits / T_tipo)`; o treino usa logits sem calibração.
 
 ### Relação com o CLEF-Flash
 
@@ -44,6 +83,12 @@ DecisioLFM-Brier-Input/
 ├── dados_tipos.py             # preparação do benchmark multitarefa
 ├── manifesto.py               # manifesto para JSONL próprio
 ├── treinar_tipos.py            # treino conjunto dos três tipos
+├── calibracao.py               # temperatura e partições de validação
+├── calibrar.py                 # ajusta T por tipo, sem retreinar LoRA
+├── ajustar_brier.py            # busca curta, seleção e teste do vencedor
+├── resumir_calibracao.py       # auditoria pareada antes/depois de T
+├── comparar_ajustes.py         # compara peso de score e taxas, uma mudança por contraste
+├── resumir_ajustes.py           # audita os ajustes e o checkpoint selecionado
 ├── verificar_checkpoint.py     # replay da validação após recarregar os pesos
 ├── decidir_json.py             # inferência PyTorch
 ├── avaliar_tipos.py            # avaliação PyTorch, DecisionLFM ou CLEF
@@ -158,17 +203,90 @@ Esse comando valida o contrato e cria `manifest.json` com contagens e hashes. El
 
 ```bash
 python treinar_tipos.py --data-dir dados/multitarefa --output-dir modelos/r8 \
-  --epochs 3 --lora-rank 8 --brier-weight 1.0 \
+  --epochs 3 --lora-rank 8 --brier-weight 1.0 --score-brier-weight 2.0 \
   --batch-size 4 --gradient-accumulation 4 \
-  --head-lr 0.001 --lora-lr 0.0001 --seed 42
+  --head-lr 0.0003 --lora-lr 0.00003 --seed 42
 
 python verificar_checkpoint.py --checkpoint modelos/r8 \
   --data-dir dados/multitarefa --output resultados/replay-r8.json
 ```
 
-Padrões: rank 8, alpha 16, dropout LoRA 0,05 e batch efetivo 16. O backbone-base fica congelado; a cabeça e os adaptadores LoRA são atualizados em todas as três épocas. O checkpoint final é salvo após a última época, sem escolher pesos pelo teste.
+Padrões: rank 8, alpha 16, dropout LoRA 0,05 e batch efetivo 16. O backbone-base fica congelado; cabeça e LoRA são atualizados conjuntamente por no máximo três épocas. A validação é dividida de forma determinística por documento e tarefa: metade seleciona época/configuração; metade fica reservada à temperatura. No benchmark atual são 900 exemplos em cada metade, 300 de cada tipo.
 
-`training.json` registra a função objetivo, revisões, hashes, hiperparâmetros e histórico. Checkpoints intermediários e estado do otimizador são salvos a cada 100 atualizações; `--checkpoint-every 0` desativa isso. Cada treino exige um diretório de saída novo. Para conferir um treino concluído, o replay recarrega os pesos e compara acurácia e loss da validação com o último histórico; use o mesmo backend/precisão do treino.
+O checkpoint principal contém os pesos da época com menor média dos Briers por tipo na metade de seleção. `selected_epoch` identifica essa época. `ReduceLROnPlateau` reduz ambas as taxas pela metade quando esse Brier deixa de melhorar; duas épocas consecutivas sem melhora encerram o treino. O orçamento continua limitado a três épocas. Não há seleção pelo teste.
+
+`training.json` registra função objetivo, revisões, hashes, partições, taxas por época e histórico. Checkpoints intermediários e estado do otimizador são salvos a cada 100 atualizações; `--checkpoint-every 0` desativa isso. Cada treino exige diretório novo. O replay recarrega os pesos e compara a validação com a **época selecionada**, usando o mesmo backend/precisão do treino. Checkpoints antigos continuam aceitos; sem `selected_epoch`, o replay usa a última época.
+
+### Calibrar e ajustar automaticamente
+
+```bash
+python calibrar.py --checkpoint modelos/r8 --data-dir dados/multitarefa
+
+# Busca de três configurações; até três épocas em cada uma, LoRA rank 8.
+python ajustar_brier.py --data-dir dados/multitarefa \
+  --models-dir modelos/ajuste-r8 --output-dir resultados/ajuste-r8
+```
+
+`calibrar.py` mantém cabeça e LoRA intactas. Extrai logits da validação completa, mas ajusta as temperaturas **somente na metade de calibração**. A outra metade mede a seleção. Ajusta um escalar positivo para cada tipo, minimizando Brier na faixa `0.25 <= T <= 16`; `T=1` participa como controle. `calibration.json` registra temperaturas, IDs, métricas de ajuste, métricas da metade de seleção e hash dos pesos. O carregamento recusa calibração de outros pesos. As métricas de calibração são de **ajuste**, não estimativas independentes de teste.
+
+As temperaturas preservam o argmax e ajustam a confiança. Em `score`, também mudam o valor esperado: acompanhe MAE junto com Brier. Os alvos e a ordem dos níveis permanecem os mesmos.
+
+A busca compara configurações predefinidas, sem dependência de Optuna:
+
+| Configuração | LR cabeça | LR LoRA | Brier choice/noul | Brier score |
+|---|---:|---:|---:|---:|
+| `lr-menor` | 0,0003 | 0,00003 | 1,0 | 1,0 |
+| `score-brier-2` | 0,0003 | 0,00003 | 1,0 | 2,0 |
+| `score-brier-2-lr-menor` | 0,0001 | 0,00001 | 1,0 | 2,0 |
+
+Cada configuração começa do mesmo modelo-base/seed. A escolha usa somente o Brier da metade de seleção, antes de ajustar temperatura ou avaliar o teste. O script encadeia treino, replay, calibração do vencedor e testes PyTorch com/sem calibração. Para também exportar e testar GGUF F16/Q8/Q4:
+
+```bash
+python ajustar_brier.py --data-dir dados/multitarefa \
+  --models-dir modelos/ajuste-r8 --output-dir resultados/ajuste-r8 \
+  --llama-dir backends/llama.cpp --build-dir backends/llama.cpp/build-decisionlfm
+```
+
+O GGUF recebe as temperaturas ajustadas no PyTorch; nenhum parâmetro é reajustado no teste. A inferência JSON aplica a calibração automaticamente quando o arquivo está presente. `avaliar_tipos.py --uncalibrated` e `gguf/avaliar.py --uncalibrated` usam `T=1` como controle. Pesos antigos sem arquivo de calibração mantêm `T=1`.
+
+`COMPARACAO_CALIBRACAO.md` e `comparison-calibracao.json` registram as mesmas métricas, com detalhes por tipo/tarefa, MAE de score e auditoria de IDs/alvos/tokens. A melhora de Brier no teste não é garantida pela melhora na validação.
+
+Referências: [temperature scaling](https://proceedings.mlr.press/v70/guo17a.html) e [ReduceLROnPlateau no PyTorch 2.11](https://docs.pytorch.org/docs/2.11/generated/torch.optim.lr_scheduler.ReduceLROnPlateau.html). Nesta implementação, a temperatura minimiza Brier; o trabalho citado originalmente ajusta a temperatura por NLL.
+
+### Acurácia como prioridade e MAE de score protegido
+
+Para calibrar pesos existentes com proteção do MAE:
+
+```bash
+python calibrar.py --checkpoint modelos/copia-do-original \
+  --data-dir dados/multitarefa --protect-score-mae
+```
+
+Em `score`, a busca aceita uma temperatura somente se seu Brier diminuir e seu MAE não aumentar na metade de calibração, comparados a `T=1`. Se nenhuma alternativa atender, conserva `T=1`. `choice` e `noul` continuam ajustando apenas Brier. A proteção é uma restrição na validação; o efeito no teste é medido separadamente.
+
+O fluxo ordenado abaixo preserva o checkpoint original, calibra uma cópia e compara cinco novos treinos de no máximo três épocas:
+
+```bash
+python comparar_ajustes.py --data-dir dados/multitarefa \
+  --original-checkpoint modelos/original-r8-3ep \
+  --models-dir modelos/ajustes-ordenados --output-dir resultados/ajustes-ordenados
+```
+
+| Configuração | Comparada com | Peso Brier score | LR cabeça | LR LoRA |
+|---|---|---:|---:|---:|
+| `controle-peso-2` | Controle das taxas atuais | 2,0 | 0,0003 | 0,00003 |
+| `peso-1` | `controle-peso-2` | 1,0 | 0,0003 | 0,00003 |
+| `peso-0p5` | `peso-1` | 0,5 | 0,0003 | 0,00003 |
+| `lr-cabeca` | `peso-1` | 1,0 | 0,001 | 0,00003 |
+| `lr-lora` | `lr-cabeca` | 1,0 | 0,001 | 0,0001 |
+
+Cada comparação declarada muda um único hiperparâmetro. Todos os treinos começam do mesmo modelo-base/seed, com rank 8, batch efetivo 16 e taxas constantes durante as épocas. Esse fluxo usa `--selection-metric accuracy --lr-scheduler constant`: escolhe a época de maior acurácia na metade de seleção, com Brier como desempate. O modo anterior por Brier/plateau continua disponível para reproduzir o protocolo anterior.
+
+Após cada treino, repete a validação e ajusta T com proteção do MAE, antes de iniciar a comparação seguinte. Depois seleciona entre pesos originais/novos, com/sem temperatura. Um candidato só é elegível se sua acurácia na metade de seleção for pelo menos a do original sem T e seu MAE de score for no máximo o do original sem T (tolerância numérica de `1e-6`). Entre elegíveis, prioriza acurácia e usa Brier como desempate. O original sem T é o controle de segurança, podendo ser mantido se os demais não atenderem.
+
+Épocas, hiperparâmetros, temperaturas e seleção final ficam fixados antes de executar os testes. O teste mede todas as variantes PyTorch. Para também exportar e avaliar F16/Q8/Q4 do checkpoint selecionado, acrescente `--llama-dir` e `--build-dir` como no comando anterior. As restrições na validação não garantem ausência de regressão no teste.
+
+`COMPARACAO_AJUSTES.md`, `comparison-ordered.json` e `checkpoint-final-sha256.json` registram a seleção, todas as métricas, MAE de score, auditoria pareada e hashes do checkpoint final. A inferência usa `modelos/ajustes-ordenados/selecionado`.
 
 ## Avaliar em PyTorch
 
@@ -310,3 +428,9 @@ Os checks de integração podem usar os comandos de replay, inferência e avalia
 Foram executados 21 testes automatizados, replay dos 1.800 exemplos de validação com diferença de loss igual a zero, preparação reduzida das nove fontes e inferência do JSON com três perguntas em PyTorch e GGUF. A exportação produziu F16/Q8/Q4 com os mesmos tensores da execução anterior.
 
 Na verificação de integração, nove exemplos por modelo e quantização Q8/Q4 tiveram os mesmos tokens, previsões e probabilidades dos resultados históricos (36 decisões verificadas, diferença máxima de probabilidade zero). Essa verificação é uma amostra de compatibilidade; a tabela histórica acima continua sendo a avaliação completa de 3.874 exemplos.
+
+### Verificação para publicação — 2026-11-04
+
+Os 32 testes automatizados passaram com o tokenizer local, tanto no Mac quanto no ambiente CUDA. Os 15 comandos Python de preparação, treino, calibração, inferência, avaliação e auditoria abriram com `--help` no ambiente completo. A inferência PyTorch foi executada na RTX 4090 com o checkpoint selecionado `controle-peso-2-protected` e o JSON dos três tipos, com e sem temperatura. Foram conferidos IDs, probabilidades, limites de `score`, zero tokens de saída e três chamadas ao backbone para as três perguntas.
+
+O replay dos 1.800 exemplos de validação reproduziu a época selecionada (3), com diferença máxima de loss igual a zero. Esses checks verificam o código e a compatibilidade dos pesos existentes; as métricas históricas acima continuam identificadas como históricas. A coleta de hashes dos experimentos inclui apenas nossos módulos e testes, sem percorrer `.venv`, pesos, resultados ou o checkout externo do llama.cpp.

@@ -1,4 +1,4 @@
-"""Treina uma cabeça compartilhada e um LoRA nos três tipos por N épocas totais."""
+"""Treina até três épocas e seleciona os pesos por Brier ou acurácia de validação."""
 
 import argparse
 from collections import Counter
@@ -14,38 +14,69 @@ import torch
 from dados_tipos import digest, encoded_record, read_jsonl
 from modelo import MODEL, REVISION, collate, create
 from objetivo import decision_loss
+from calibracao import TYPES, validation_partition
 
 
 @torch.no_grad()
-def validate(model, records, brier_weight=1.0):
+def validate(
+    model, records, brier_weight=1.0, score_brier_weight=None, selection_ids=None
+):
     model.eval()
     device = next(model.parameters()).device
-    totals = {
-        kind: {"correct": 0, "records": 0, "loss": 0.0}
-        for kind in ["choice", "noul", "score"]
-    }
+
+    def empty():
+        return {
+            kind: {"correct": 0, "records": 0, "loss": 0.0, "brier": 0.0, "mae": 0.0}
+            for kind in TYPES
+        }
+
+    totals, selected = empty(), empty()
+    score_brier_weight = (
+        brier_weight if score_brier_weight is None else score_brier_weight
+    )
     for index, record in enumerate(records):
         batch = collate([record], model.tokenizer.pad_token_id, device)
         logits = model(batch)
         target = torch.tensor([record["target"]], device=device)
-        loss = decision_loss(logits, target, brier_weight).item()
+        weight = score_brier_weight if record["type"] == "score" else brier_weight
+        loss = decision_loss(logits, target, weight).item()
         if not torch.isfinite(logits[batch["option_mask"]]).all() or not torch.isfinite(
             torch.tensor(loss)
         ):
             raise ValueError("Validação não finita")
-        item = totals[record["type"]]
-        item["correct"] += int(logits.argmax(-1).item() == record["target"])
-        item["records"] += 1
-        item["loss"] += loss
+        ps = logits.float().softmax(-1)[0]
+        brier = (ps.square().sum() - 2 * ps[record["target"]] + 1).item()
+        expected_score = (ps * torch.arange(len(ps), device=device)).sum().item()
+        collections = [totals]
+        if selection_ids is not None and record["id"] in selection_ids:
+            collections.append(selected)
+        for collection in collections:
+            item = collection[record["type"]]
+            item["correct"] += int(logits.argmax(-1).item() == record["target"])
+            item["records"] += 1
+            item["loss"] += loss
+            item["brier"] += brier
+            item["mae"] += abs(expected_score - record["target"])
         if device.type == "mps" and (index + 1) % 300 == 0:
             print(f"validation={index + 1}/{len(records)}", flush=True)
-    for item in totals.values():
-        item["accuracy"] = item["correct"] / item["records"]
-        item["loss"] /= item["records"]
-    return {
-        "types": totals,
-        "mean_type_accuracy": sum(item["accuracy"] for item in totals.values()) / 3,
-    }
+
+    def summarize(values):
+        for kind, item in values.items():
+            item["accuracy"] = item["correct"] / item["records"]
+            for key in ["loss", "brier", "mae"]:
+                item[key] /= item["records"]
+            if kind != "score":
+                item.pop("mae")
+        return {
+            "types": values,
+            "mean_type_accuracy": sum(item["accuracy"] for item in values.values()) / 3,
+            "mean_type_brier": sum(item["brier"] for item in values.values()) / 3,
+        }
+
+    result = summarize(totals)
+    if selection_ids is not None:
+        result["selection"] = summarize(selected)
+    return result
 
 
 def main():
@@ -55,8 +86,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--gradient-accumulation", type=int, default=4)
-    parser.add_argument("--head-lr", type=float, default=1e-3)
-    parser.add_argument("--lora-lr", type=float, default=1e-4)
+    parser.add_argument("--head-lr", type=float, default=3e-4)
+    parser.add_argument("--lora-lr", type=float, default=3e-5)
     parser.add_argument("--lora-rank", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -64,6 +95,20 @@ def main():
         type=float,
         default=1.0,
         help="Peso do Brier somado à entropia cruzada; 0 reproduz CE",
+    )
+    parser.add_argument(
+        "--score-brier-weight",
+        type=float,
+        default=2.0,
+        help="Peso do Brier para score; os outros tipos usam --brier-weight",
+    )
+    parser.add_argument("--early-stopping-patience", type=int, default=2)
+    parser.add_argument("--lr-factor", type=float, default=0.5)
+    parser.add_argument(
+        "--selection-metric", choices=["brier", "accuracy"], default="brier"
+    )
+    parser.add_argument(
+        "--lr-scheduler", choices=["plateau", "constant"], default="plateau"
     )
     parser.add_argument(
         "--checkpoint-every",
@@ -87,6 +132,14 @@ def main():
         parser.error("Use diretório novo e parâmetros positivos")
     if not math.isfinite(args.brier_weight) or args.brier_weight < 0:
         parser.error("brier-weight deve ser finito e >= 0")
+    if not math.isfinite(args.score_brier_weight) or args.score_brier_weight < 0:
+        parser.error("score-brier-weight deve ser finito e >= 0")
+    if (
+        args.epochs > 3
+        or args.early_stopping_patience < 1
+        or not 0 < args.lr_factor < 1
+    ):
+        parser.error("Use no máximo três épocas, patience >= 1 e lr-factor entre 0 e 1")
     if args.checkpoint_every < 0:
         parser.error("checkpoint-every deve ser >= 0")
     random.seed(args.seed)
@@ -111,6 +164,8 @@ def main():
         row["group"] for row in samples["validation"]
     }:
         raise ValueError("Documento presente no treino e validação")
+    partition = validation_partition(samples["validation"], args.seed)
+    selection_ids = set(partition["selection"])
     model = create()
     device = next(model.parameters()).device
     model.add_lora(args.lora_rank)
@@ -137,6 +192,19 @@ def main():
             },
         ]
     )
+    scheduler = (
+        torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min" if args.selection_metric == "brier" else "max",
+            factor=args.lr_factor,
+            patience=0,
+            threshold=1e-4,
+            threshold_mode="abs",
+            min_lr=[args.head_lr / 16, args.lora_lr / 16],
+        )
+        if args.lr_scheduler == "plateau"
+        else None
+    )
     args.output_dir.mkdir(parents=True)
     training = {
         "status": "running",
@@ -147,10 +215,19 @@ def main():
         "objective": {
             "name": "cross_entropy_plus_brier",
             "brier_weight": args.brier_weight,
+            "score_brier_weight": args.score_brier_weight,
             "label_smoothing": 0.0,
             "brier_scale": "sum over classes, range [0,2]",
         },
-        "checkpoint_rule": "Final weights after exactly N complete joint head+LoRA epochs",
+        "checkpoint_rule": (
+            "Lowest Brier"
+            if args.selection_metric == "brier"
+            else "Highest accuracy; Brier breaks ties"
+        )
+        + " on selection half of validation; at most 3 epochs",
+        "validation_partition": partition,
+        "selection_metric": "selection.mean_type_" + args.selection_metric,
+        "selected_epoch": None,
         "args": {
             key: str(value) if isinstance(value, Path) else value
             for key, value in vars(args).items()
@@ -206,6 +283,7 @@ def main():
             "loss_sum": loss_sum,
             "records": count,
             "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler else None,
             "python_rng": random.getstate(),
             "shuffle_rng": rng.getstate(),
             "torch_rng": torch.get_rng_state(),
@@ -226,6 +304,7 @@ def main():
         save_manifest()
         print(f"checkpoint={path}", flush=True)
 
+    best_key, best_brier, bad_epochs = None, math.inf, 0
     try:
         for epoch in range(1, args.epochs + 1):
             model.train()
@@ -236,7 +315,15 @@ def main():
                 batch = collate(items, model.tokenizer.pad_token_id, device)
                 target = torch.tensor([row["target"] for row in items], device=device)
                 loss = decision_loss(
-                    model(batch), target, args.brier_weight, reduction="sum"
+                    model(batch),
+                    target,
+                    [
+                        args.score_brier_weight
+                        if row["type"] == "score"
+                        else args.brier_weight
+                        for row in items
+                    ],
+                    reduction="sum",
                 )
                 if not torch.isfinite(loss):
                     raise ValueError("Loss não finita")
@@ -267,18 +354,53 @@ def main():
                         f"loss={loss_sum / count:.5f} elapsed_s={time.perf_counter() - started:.1f}",
                         flush=True,
                     )
-            result = validate(model, records["validation"], args.brier_weight)
+            result = validate(
+                model,
+                records["validation"],
+                args.brier_weight,
+                args.score_brier_weight,
+                selection_ids,
+            )
+            selection = result["selection"]
+            score = selection["mean_type_brier"]
+            accuracy = selection["mean_type_accuracy"]
+            key = (-score,) if args.selection_metric == "brier" else (accuracy, -score)
+            learning_rates = [group["lr"] for group in optimizer.param_groups]
+            if scheduler:
+                scheduler.step(score if args.selection_metric == "brier" else accuracy)
             training["history"].append(
                 {
                     "epoch": epoch,
                     "train_loss": loss_sum / count,
                     "optimizer_steps": steps,
                     "validation": result,
+                    "learning_rates": learning_rates,
+                    "next_learning_rates": [
+                        group["lr"] for group in optimizer.param_groups
+                    ],
                 }
             )
-            model.save(args.output_dir)
+            best_brier = min(best_brier, score)
+            training["best_validation_brier"] = best_brier
+            if best_key is None or key > best_key:
+                best_key, bad_epochs = key, 0
+                training.update(
+                    selected_epoch=epoch,
+                    selected_validation_accuracy=accuracy,
+                    selected_validation_brier=score,
+                )
+                model.save(args.output_dir)
+            else:
+                bad_epochs += 1
+            training["completed_epochs"] = epoch
             save_manifest()
             print(json.dumps(training["history"][-1]), flush=True)
+            if bad_epochs >= args.early_stopping_patience:
+                training["stop_reason"] = (
+                    f"early_stopping_validation_{args.selection_metric}"
+                )
+                break
+        training.setdefault("stop_reason", "epoch_budget")
         training["status"] = "completed"
     finally:
         if training["status"] != "completed":

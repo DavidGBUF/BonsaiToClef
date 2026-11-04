@@ -28,13 +28,23 @@ def main():
     ) or manifest["validation"]["sha256"] != digest(args.data_dir / "validation.jsonl"):
         raise ValueError("Validação diferente da usada no treinamento")
     torch.set_num_threads(8)
-    model = DecisionLFM.load(args.checkpoint)
+    model = DecisionLFM.load(args.checkpoint, calibrated=False)
     records = [
         encoded_record(model.tokenizer, row, manifest["max_input_tokens"])
         for row in read_jsonl(args.data_dir / "validation.jsonl")
     ]
-    actual = validate(model, records, training["objective"]["brier_weight"])
-    expected = training["history"][-1]["validation"]
+    partition = training.get("validation_partition")
+    actual = validate(
+        model,
+        records,
+        training["objective"]["brier_weight"],
+        training["objective"].get("score_brier_weight"),
+        set(partition["selection"]) if partition else None,
+    )
+    selected = training.get("selected_epoch", training["history"][-1]["epoch"])
+    expected = next(
+        h["validation"] for h in training["history"] if h["epoch"] == selected
+    )
     for kind in ["choice", "noul", "score"]:
         a, b = actual["types"][kind], expected["types"][kind]
         if (
@@ -46,6 +56,7 @@ def main():
     result = {
         "status": "passed",
         "records": len(records),
+        "selected_epoch": selected,
         "actual": actual,
         "expected": expected,
         "max_abs_loss_difference": max(
