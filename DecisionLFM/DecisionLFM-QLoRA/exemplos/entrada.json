@@ -1,0 +1,27 @@
+{
+  "state": {
+    "mensagem": "Meu cartão foi recusado três vezes e preciso pagar uma emergência.",
+    "tentativas": 3
+  },
+  "questions": {
+    "intencao": {
+      "type": "choice",
+      "instructions": "Qual problema o cliente relata?",
+      "criteria": {
+        "cartao": "Pagamento com cartão recusado",
+        "saque": "Problema ao sacar dinheiro",
+        "transferencia": "Problema com transferência bancária"
+      }
+    },
+    "urgencia": {
+      "type": "noul",
+      "instructions": "O cliente precisa resolver o problema com urgência?"
+    },
+    "gravidade": {
+      "type": "score",
+      "instructions": "Qual é a gravidade do problema descrito?",
+      "criteria": ["Baixa", "Moderada", "Alta", "Crítica"]
+    }
+  }
+}
+

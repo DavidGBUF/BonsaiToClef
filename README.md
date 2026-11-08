@@ -135,6 +135,13 @@ O README contém o fluxo completo para preparar dados, treinar, conferir os peso
 calibrar, responder a um JSON e avaliar. Várias perguntas são respondidas
 sequencialmente, com uma passagem pelo backbone por pergunta.
 
+A pasta [DecisionLFM-QLoRA](DecisionLFM/DecisionLFM-QLoRA/README.md) implementa
+o treinamento e a inferência com **QLoRA (4-bit NormalFloat4 + Dupla Quantização +
+computação BF16)** no módulo de linguagem do LFM3-VL-2B, mantendo a `DecisionHead`
+em FP32, suporte a otimizadores paginados (`PagedAdamW32bit` / `PagedAdamW8bit`),
+fusão limpa sobre o modelo-base FP32 para exportação GGUF e comparador pareado
+direto contra o LoRA BF16 (`comparar_qlora.py`).
+
 ## Referências
 
 - [CLEF-Flash e implementação oficial](https://huggingface.co/Cloudflare/clef-flash)

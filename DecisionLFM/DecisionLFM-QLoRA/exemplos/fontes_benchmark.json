@@ -1,0 +1,48 @@
+{
+  "banking77": {
+    "repository": "PolyAI/banking77",
+    "revision": "1846984189f2bc0ac51c6fc3a600fa9e1714e0c6",
+    "config": null
+  },
+  "ag_news": {
+    "repository": "fancyzhx/ag_news",
+    "revision": "eb185aade064a813bc0b7f42de02595523103ca4",
+    "config": null
+  },
+  "boolq": {
+    "repository": "google/boolq",
+    "revision": "35b264d03638db9f4ce671b711558bf7ff0f80d5",
+    "config": null
+  },
+  "snli": {
+    "repository": "stanfordnlp/snli",
+    "revision": "cdb5c3d5eed6ead6e5a341c8e56e669bb666725b",
+    "config": null
+  },
+  "sst5": {
+    "repository": "SetFit/sst5",
+    "revision": "e51bdcd8cd3a30da231967c1a249ba59361279a3",
+    "config": null
+  },
+  "yelp": {
+    "repository": "Yelp/yelp_review_full",
+    "revision": "c1f9ee939b7d05667af864ee1cb066393154bf85",
+    "config": null
+  },
+  "emotion": {
+    "repository": "dair-ai/emotion",
+    "revision": "cab853a1dbdf4c42c2b3ef2173804746df8825fe",
+    "config": "split"
+  },
+  "rte": {
+    "repository": "aps/super_glue",
+    "revision": "3de24cf8022e94f4ee4b9d55a6f539891524d646",
+    "config": "rte"
+  },
+  "amazon": {
+    "repository": "SetFit/amazon_reviews_multi_en",
+    "revision": "ec73b665e4be0f567b69d39425355401cfe0d29b",
+    "config": null
+  }
+}
+
